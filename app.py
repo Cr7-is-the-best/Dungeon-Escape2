@@ -1,7 +1,26 @@
-# import Flask first
+#pip install flask
 
-from flask import Flask
+from flask import Flask, jsonify, request
+import json, os
+
 app = Flask(__name__)
+SCORES_FILE = "scores.json"
+
+def load_scores():
+    if os.path.exists(SCORES_FILE):
+        try:
+            with open(SCORES_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+def save_score(name, score, wave, map_name):
+    scores = load_scores()
+    scores.append({"name": str(name)[:16], "score": int(score), "wave": int(wave), "map": str(map_name)})
+    scores.sort(key=lambda x: x["score"], reverse=True)
+    with open(SCORES_FILE, "w") as f:
+        json.dump(scores[:10], f)
 
 PAGE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -33,41 +52,122 @@ PAGE = r"""<!DOCTYPE html>
     color: #333;
     text-align: center;
   }
+  #scoreForm {
+    display: none;
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    background: #0d0d20;
+    border: 2px solid #445;
+    padding: 20px 28px;
+    text-align: center;
+    z-index: 10;
+  }
+  #scoreForm p { color:#aaa; font-size:13px; margin-bottom:10px; }
+  #scoreForm input {
+    background:#07070f; border:1px solid #445; color:#fff;
+    padding:6px 10px; font-size:14px; width:160px; text-align:center;
+    outline:none; letter-spacing:1px;
+  }
+  #scoreForm button {
+    display:block; margin:10px auto 0; background:#224488;
+    border:1px solid #88ccff; color:#88ccff;
+    padding:7px 24px; font-size:13px; cursor:pointer;
+  }
+  #scoreForm button:hover { background:#2a5aaa; }
 </style>
 </head>
 <body>
-<canvas id="gameCanvas" width="800" height="500"></canvas>
+<div style="position:relative;display:inline-block;">
+<canvas id="gameCanvas" width="1200" height="730"></canvas>
+<div id="scoreForm">
+  <p id="scoreMsg">Game Over! Enter your name:</p>
+  <input id="scoreName" maxlength="16" placeholder="Your name" />
+  <button id="scoreSubmit">Submit Score</button>
+</div>
+</div>
 <div id="hint">Dungeon Escape 2 — Kill enemies to earn gold &bull; Keys 1-5 select towers</div>
 <script>
 // DUNGEON ESCAPE 2 — Tower Defense
 const canvas = document.getElementById("gameCanvas");
 const ctx = canvas.getContext("2d");
-const CW = 800, CH = 500;
+const CW = 1200, CH = 730;
 
 // Grid config
-const CELL = 40, COLS = 16, ROWS = 11;
-const GX = 0, GY = 50;    // grid origin (below top HUD)
-const PX = 640, PW = 160;  // right panel
+const CELL = 60, COLS = 16, ROWS = 11;
+const GX = 0, GY = 70;    // grid origin (below top HUD)
+const PX = 960, PW = 240;  // right panel
 
-// Path waypoints (pixel centers of the road corridor)
-const WP = [
-  [-20,  150],
-  [180,  150],
-  [180,  390],
-  [460,  390],
-  [460,  190],
-  [820,  190],
+// ---- MAP DEFINITIONS ----
+const MAPS = [
+  {
+    name: "The Bend",
+    desc: "A classic winding road",
+    diff: "Easy",
+    diffCol: "#44cc44",
+    wp: [[-30,220],[270,220],[270,580],[690,580],[690,280],[990,280]],
+    buildPath() {
+      const s = new Set();
+      for (let c=0;c<=4;c++) s.add(`${c},2`);
+      for (let r=2;r<=8;r++) s.add(`4,${r}`);
+      for (let c=4;c<=11;c++) s.add(`${c},8`);
+      for (let r=3;r<=8;r++) s.add(`11,${r}`);
+      for (let c=11;c<=15;c++) s.add(`${c},3`);
+      return s;
+    }
+  },
+  {
+    name: "S-Curve",
+    desc: "A serpentine switchback",
+    diff: "Medium",
+    diffCol: "#ffaa00",
+    wp: [[-30,160],[450,160],[450,460],[150,460],[150,640],[990,640]],
+    buildPath() {
+      const s = new Set();
+      for (let c=0;c<=7;c++) s.add(`${c},1`);
+      for (let r=1;r<=7;r++) s.add(`7,${r}`);
+      for (let c=2;c<=7;c++) s.add(`${c},7`);
+      for (let r=7;r<=9;r++) s.add(`2,${r}`);
+      for (let c=2;c<=15;c++) s.add(`${c},9`);
+      return s;
+    }
+  },
+  {
+    name: "The Maze",
+    desc: "Long route across the grid",
+    diff: "Hard",
+    diffCol: "#ff3333",
+    wp: [[-30,100],[870,100],[870,340],[210,340],[210,580],[750,580],[750,220],[990,220]],
+    buildPath() {
+      const s = new Set();
+      for (let c=0;c<=14;c++) s.add(`${c},0`);
+      for (let r=0;r<=4;r++) s.add(`14,${r}`);
+      for (let c=3;c<=14;c++) s.add(`${c},4`);
+      for (let r=4;r<=8;r++) s.add(`3,${r}`);
+      for (let c=3;c<=12;c++) s.add(`${c},8`);
+      for (let r=2;r<=8;r++) s.add(`12,${r}`);
+      for (let c=12;c<=15;c++) s.add(`${c},2`);
+      return s;
+    }
+  },
 ];
 
-// Precompute path segments
-const SEGS = [];
-let TOTAL_LEN = 0;
-for (let i = 1; i < WP.length; i++) {
-  const [ax,ay] = WP[i-1], [bx,by] = WP[i];
-  const len = Math.hypot(bx-ax, by-ay);
-  SEGS.push({ ax, ay, bx, by, len, start: TOTAL_LEN });
-  TOTAL_LEN += len;
+let selectedMap = 0;
+let WP = [], PATH_SET = new Set(), SEGS = [], TOTAL_LEN = 0;
+
+function applyMap(idx) {
+  selectedMap = idx;
+  WP = MAPS[idx].wp;
+  PATH_SET = MAPS[idx].buildPath();
+  SEGS = []; TOTAL_LEN = 0;
+  for (let i = 1; i < WP.length; i++) {
+    const [ax,ay] = WP[i-1], [bx,by] = WP[i];
+    const len = Math.hypot(bx-ax, by-ay);
+    SEGS.push({ ax, ay, bx, by, len, start: TOTAL_LEN });
+    TOTAL_LEN += len;
+  }
 }
+applyMap(0);
 
 function posAtDist(d) {
   for (const s of SEGS) {
@@ -79,14 +179,6 @@ function posAtDist(d) {
   return [...WP[WP.length-1]];
 }
 
-// Mark which grid cells are on the path (cannot place towers here)
-const PATH_SET = new Set();
-for (let c=0;c<=4;c++) PATH_SET.add(`${c},2`);
-for (let r=2;r<=8;r++) PATH_SET.add(`4,${r}`);
-for (let c=4;c<=11;c++) PATH_SET.add(`${c},8`);
-for (let r=3;r<=8;r++) PATH_SET.add(`11,${r}`);
-for (let c=11;c<=15;c++) PATH_SET.add(`${c},3`);
-
 // Upgrade multipliers per level (index = level-1)
 const UPGRADE_MULTS = [
   { dmg:1.0, range:1.0, rate:1.0  },
@@ -95,8 +187,8 @@ const UPGRADE_MULTS = [
 ];
 function upgradeCost(t) {
   const def = TDEFS[t.type];
-  if (t.level === 1) return Math.floor(def.cost * 0.75);
-  if (t.level === 2) return Math.floor(def.cost * 1.5);
+  if (t.level === 1) return Math.floor(def.cost * 3.5);
+  if (t.level === 2) return Math.floor(def.cost * 7);
   return Infinity;
 }
 function applyLevel(t) {
@@ -110,19 +202,51 @@ function applyLevel(t) {
 // Tower definitions
 const TOWER_ORDER = ["rifle","shotgun","sniper","minigun","rpg"];
 const TDEFS = {
-  rifle:   { name:"Rifle",   cost:20,  req:0,  dmg:40,  range:120, rate:500,  col:"cyan",    aoe:0,  n:1, sprd:0,    pspd:240, desc:"Fast, single shot" },
-  shotgun: { name:"Shotgun", cost:40,  req:10, dmg:25,  range:90,  rate:1200, col:"#ff8800", aoe:0,  n:5, sprd:0.35, pspd:200, desc:"Short range spread" },
-  sniper:  { name:"Sniper",  cost:60,  req:15, dmg:130, range:230, rate:1800, col:"#88ff00", aoe:0,  n:1, sprd:0,    pspd:420, desc:"Long range, high dmg" },
-  minigun: { name:"Minigun", cost:100, req:25, dmg:15,  range:130, rate:100,  col:"#ffff00", aoe:0,  n:1, sprd:0.10, pspd:280, desc:"Rapid fire stream" },
-  rpg:     { name:"RPG",     cost:150, req:40, dmg:80,  range:160, rate:2500, col:"#ff4444", aoe:80, n:1, sprd:0,    pspd:160, desc:"Explosive AoE blast" },
+  rifle:   { name:"Rifle",   cost:50,  req:0,  dmg:40,  range:120, rate:500,  col:"cyan",    aoe:0,  n:1, sprd:0,    pspd:240, desc:"Fast, single shot" },
+  shotgun: { name:"Shotgun", cost:150, req:10, dmg:25,  range:90,  rate:1200, col:"#ff8800", aoe:0,  n:5, sprd:0.35, pspd:200, desc:"Short range spread" },
+  sniper:  { name:"Sniper",  cost:300, req:15, dmg:130, range:230, rate:1800, col:"#88ff00", aoe:0,  n:1, sprd:0,    pspd:420, desc:"Long range, high dmg" },
+  minigun: { name:"Minigun", cost:450, req:25, dmg:25,  range:130, rate:100,  col:"#ffff00", aoe:0,  n:1, sprd:0.10, pspd:280, desc:"Rapid fire stream" },
+  rpg:     { name:"RPG",     cost:600, req:40, dmg:80,  range:160, rate:2500, col:"#ff4444", aoe:80, n:1, sprd:0,    pspd:160, desc:"Explosive AoE blast" },
 };
 
 // Enemy types
 const ETYPES = [
-  { type:"normal", color:"#cc2200", mhp:80,  spd:55,  gold:5,  sc:1, lives:1, sz:11 },
-  { type:"fast",   color:"#ff7700", mhp:50,  spd:100, gold:8,  sc:2, lives:1, sz:8  },
-  { type:"tank",   color:"#8800cc", mhp:240, spd:32,  gold:20, sc:5, lives:3, sz:14 },
+  { type:"normal", color:"#cc2200", mhp:350,  spd:100,  gold:30,  sc:1, lives:10, sz:11 },
+  { type:"fast",   color:"#ff7700", mhp:550, spd:150, gold:50,  sc:2, lives:5,  sz:8  },
+  { type:"tank",   color:"#8800cc", mhp:450, spd:125,  gold:75, sc:5, lives:20, sz:14 },
 ];
+
+// ---- LEADERBOARD ----
+let lbData = [];
+let lbLoaded = false;
+
+function fetchLeaderboard(cb) {
+  fetch("/scores").then(r => r.json()).then(data => {
+    lbData = data; lbLoaded = true;
+    if (cb) cb();
+  }).catch(() => { lbLoaded = true; });
+}
+
+function submitScore(name) {
+  fetch("/scores", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ name, score, wave, map: MAPS[selectedMap].name })
+  }).then(() => fetchLeaderboard());
+}
+
+const scoreForm = document.getElementById("scoreForm");
+const scoreName = document.getElementById("scoreName");
+document.getElementById("scoreSubmit").addEventListener("click", () => {
+  const name = scoreName.value.trim() || "Anonymous";
+  scoreForm.style.display = "none";
+  submitScore(name);
+  state = "leaderboard";
+  fetchLeaderboard();
+});
+scoreName.addEventListener("keydown", e => {
+  if (e.key === "Enter") document.getElementById("scoreSubmit").click();
+});
 
 // ---- GAME STATE ----
 let state = "title";
@@ -135,8 +259,9 @@ let hoverC = -1, hoverR = -1;
 let sellFlashes = [];
 
 function initGame() {
-  lives = 10;
-  score = 0; gold = 120; wave = 0;
+  applyMap(selectedMap);
+  lives = 100;
+  score = 0; gold = 120; wave = ;
   towers = []; enemies = []; projs = []; explosions = []; sellFlashes = [];
   selected = "rifle";
   waveQueue = []; waveIdx = 0; waveTimer = 0; waveDelay = 0;
@@ -152,6 +277,7 @@ function startWave() {
   waveTimer = 1500;
   waveDelay = Math.max(350, 1200 - wave * 55);
   betweenTimer = 0;
+  gameOverFormShown = false;
 }
 
 function buildWave(w) {
@@ -182,7 +308,18 @@ canvas.addEventListener("mousemove", e => {
 canvas.addEventListener("click", e => {
   const r = canvas.getBoundingClientRect();
   const cx = e.clientX - r.left, cy = e.clientY - r.top;
-  if (state === "title" || state === "gameover") { initGame(); return; }
+  if (state === "title") {
+    const lbBtnY = CH/2 + 90;
+    if (cx >= CW/2-70 && cx <= CW/2+70 && cy >= lbBtnY-16 && cy <= lbBtnY+14) {
+      fetchLeaderboard(); state = "leaderboard";
+    } else {
+      state = "mapselect";
+    }
+    return;
+  }
+  if (state === "gameover") { return; }
+  if (state === "mapselect") { mapSelectClick(cx, cy); return; }
+  if (state === "leaderboard") { state = "title"; return; }
   if (state !== "playing") return;
   if (cx >= CW-68 && cx <= CW-10 && cy >= 10 && cy <= 40) { state = "title"; return; }
   if (cx >= PX) { panelClick(cx, cy); return; }
@@ -203,9 +340,40 @@ canvas.addEventListener("contextmenu", e => {
   towers.splice(idx, 1);
 });
 
+function mapSelectClick(cx, cy) {
+  const cardW = 170, cardH = 260, gap = 20;
+  const totalW = MAPS.length * cardW + (MAPS.length - 1) * gap;
+  const startX = (CW - totalW) / 2;
+  const cardY = 160;
+  for (let i = 0; i < MAPS.length; i++) {
+    const x = startX + i * (cardW + gap);
+    if (cx >= x && cx <= x + cardW && cy >= cardY && cy <= cardY + cardH) {
+      selectedMap = i;
+      initGame();
+      return;
+    }
+  }
+  // Back button
+  if (cx >= CW/2 - 60 && cx <= CW/2 + 60 && cy >= cardY + cardH + 20 && cy <= cardY + cardH + 50) {
+    state = "title";
+  }
+}
+
 window.addEventListener("keydown", e => {
-  if ((e.key === "Enter" || e.key === " ") && (state === "title" || state === "gameover")) {
-    e.preventDefault(); initGame();
+  if ((e.key === "Enter" || e.key === " ") && state === "title") {
+    e.preventDefault(); state = "mapselect";
+  }
+  if (state === "gameover" && e.key === "Escape") {
+    e.preventDefault(); scoreForm.style.display = "none"; state = "mapselect";
+  }
+  if (state === "leaderboard" && (e.key === "Escape" || e.key === "Enter")) {
+    e.preventDefault(); state = "title";
+  }
+  if (state === "mapselect") {
+    if (e.key === "1") { selectedMap = 0; initGame(); }
+    if (e.key === "2") { selectedMap = 1; initGame(); }
+    if (e.key === "3") { selectedMap = 2; initGame(); }
+    if (e.key === "Escape") state = "title";
   }
   if (state === "playing") {
     if (e.key === "1") selected = "rifle";
@@ -374,8 +542,10 @@ function fireTower(t, target) {
 // ---- DRAW ----
 function draw(ts) {
   ctx.fillStyle = "#07070f"; ctx.fillRect(0,0,CW,CH);
-  if (state === "title")    { drawTitle(ts); return; }
-  if (state === "gameover") { drawGameOver(); return; }
+  if (state === "title")     { drawTitle(ts); return; }
+  if (state === "mapselect") { drawMapSelect(ts); return; }
+  if (state === "gameover")  { drawGameOver(); return; }
+  if (state === "leaderboard") { drawLeaderboard(); return; }
   drawGrid();
   drawPath();
   drawExplosions();
@@ -530,11 +700,13 @@ function drawHUD(ts) {
   ctx.fillStyle = "#0a0a1a"; ctx.fillRect(0, 0, CW, GY);
   ctx.strokeStyle = "#1a1a30"; ctx.lineWidth = 1; ctx.strokeRect(0, 0, CW, GY);
   ctx.font = "bold 12px Arial"; ctx.fillStyle = "#aaa"; ctx.fillText("LIVES:", 8, 32);
-  for (let i = 0; i < 10; i++) {
-    ctx.fillStyle = i < lives ? "#cc2200" : "#2a0000";
-    ctx.fillRect(62 + i*16, 20, 12, 12);
-    ctx.strokeStyle = "#550000"; ctx.lineWidth = 1; ctx.strokeRect(62 + i*16, 20, 12, 12);
-  }
+  ctx.fillStyle = lives > 50 ? "#cc2200" : lives > 20 ? "#ff6600" : "#ff0000";
+  ctx.font = "bold 14px Arial"; ctx.fillText(lives, 62, 32);
+  const barW = 180, barH = 10;
+  ctx.fillStyle = "#2a0000"; ctx.fillRect(62, 37, barW, barH);
+  ctx.fillStyle = lives > 50 ? "#cc2200" : lives > 20 ? "#ff6600" : "#ff2200";
+  ctx.fillRect(62, 37, Math.max(0, barW * (lives / 100)), barH);
+  ctx.strokeStyle = "#550000"; ctx.lineWidth = 1; ctx.strokeRect(62, 37, barW, barH);
   ctx.textAlign = "center";
   ctx.fillStyle = "white"; ctx.font = "bold 15px Arial"; ctx.fillText(`Wave ${wave}`, 350, 22);
   ctx.fillStyle = "#FFD700"; ctx.font = "bold 14px Arial"; ctx.fillText(`\u2b21 ${gold}g`, 350, 40);
@@ -590,6 +762,101 @@ function drawPanel() {
   ctx.textAlign = "left";
 }
 
+function drawMapSelect(ts) {
+  // Background grid
+  ctx.strokeStyle = "#12122a"; ctx.lineWidth = 1;
+  for (let x=0;x<CW;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,CH);ctx.stroke();}
+  for (let y=0;y<CH;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(CW,y);ctx.stroke();}
+
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#FFD700"; ctx.font = "bold 28px Arial";
+  ctx.fillText("SELECT A MAP", CW/2, 60);
+  ctx.fillStyle = "#555"; ctx.font = "13px Arial";
+  ctx.fillText("Press 1, 2 or 3 — or click a card", CW/2, 85);
+
+  const cardW = 170, cardH = 260, gap = 20;
+  const totalW = MAPS.length * cardW + (MAPS.length - 1) * gap;
+  const startX = (CW - totalW) / 2;
+  const cardY = 110;
+
+  MAPS.forEach((map, i) => {
+    const x = startX + i * (cardW + gap);
+    const hov = lastMX >= x && lastMX <= x+cardW && lastMY >= cardY && lastMY <= cardY+cardH;
+    const sel = selectedMap === i;
+
+    // Card background
+    ctx.fillStyle = sel ? "#1a2a4a" : hov ? "#141428" : "#0d0d20";
+    ctx.fillRect(x, cardY, cardW, cardH);
+    ctx.strokeStyle = sel ? "#88ccff" : hov ? "#4466aa" : "#2a2a55";
+    ctx.lineWidth = sel ? 2.5 : 1.5;
+    ctx.strokeRect(x, cardY, cardW, cardH);
+
+    // Number badge
+    ctx.fillStyle = "#222244";
+    ctx.fillRect(x+6, cardY+6, 24, 24);
+    ctx.fillStyle = "#aaa"; ctx.font = "bold 14px Arial"; ctx.textAlign = "center";
+    ctx.fillText(i+1, x+18, cardY+23);
+
+    // Map name
+    ctx.fillStyle = "#ffffff"; ctx.font = "bold 15px Arial";
+    ctx.fillText(map.name, x + cardW/2, cardY + 44);
+
+    // Difficulty badge
+    ctx.fillStyle = map.diffCol; ctx.font = "bold 11px Arial";
+    ctx.fillText(map.diff, x + cardW/2, cardY + 62);
+
+    // Mini path preview
+    const pw = cardW - 20, ph = 120, px2 = x + 10, py2 = cardY + 76;
+    ctx.fillStyle = "#080818"; ctx.fillRect(px2, py2, pw, ph);
+    ctx.strokeStyle = "#1a1a35"; ctx.lineWidth = 1; ctx.strokeRect(px2, py2, pw, ph);
+
+    // Scale waypoints to preview box (game area is 960×660, offset GY=70)
+    const scaleX = pw / 960, scaleH = ph / 660;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(px2, py2, pw, ph); ctx.clip();
+    ctx.strokeStyle = "#3a2a08"; ctx.lineWidth = 10; ctx.lineCap = "butt";
+    ctx.beginPath();
+    map.wp.forEach(([wx,wy], j) => {
+      const mx2 = px2 + wx * scaleX;
+      const my2 = py2 + (wy - GY) * scaleH;
+      j === 0 ? ctx.moveTo(mx2, my2) : ctx.lineTo(mx2, my2);
+    });
+    ctx.stroke();
+    ctx.strokeStyle = "#554422"; ctx.lineWidth = 1.5; ctx.setLineDash([4,6]);
+    ctx.beginPath();
+    map.wp.forEach(([wx,wy], j) => {
+      const mx2 = px2 + wx * scaleX;
+      const my2 = py2 + (wy - GY) * scaleH;
+      j === 0 ? ctx.moveTo(mx2, my2) : ctx.lineTo(mx2, my2);
+    });
+    ctx.stroke(); ctx.setLineDash([]);
+    ctx.restore();
+
+    // Description
+    ctx.fillStyle = "#888"; ctx.font = "11px Arial";
+    ctx.fillText(map.desc, x + cardW/2, cardY + cardH - 30);
+
+    // Play button
+    const btnY = cardY + cardH - 20;
+    ctx.fillStyle = sel ? "#224488" : hov ? "#1a3366" : "#111133";
+    ctx.fillRect(x+20, btnY - 14, cardW-40, 26);
+    ctx.strokeStyle = sel ? "#88ccff" : "#445";
+    ctx.lineWidth = 1; ctx.strokeRect(x+20, btnY - 14, cardW-40, 26);
+    ctx.fillStyle = sel ? "#88ccff" : "#aaa"; ctx.font = "bold 12px Arial";
+    ctx.fillText(sel ? "SELECTED" : "PLAY", x + cardW/2, btnY + 4);
+  });
+
+  // Back button
+  const bkY = cardY + cardH + 30;
+  const hb = lastMX >= CW/2-60 && lastMX <= CW/2+60 && lastMY >= bkY-14 && lastMY <= bkY+12;
+  ctx.fillStyle = hb ? "#330000" : "#1a0000";
+  ctx.fillRect(CW/2-60, bkY-14, 120, 26);
+  ctx.strokeStyle = "#553333"; ctx.lineWidth = 1; ctx.strokeRect(CW/2-60, bkY-14, 120, 26);
+  ctx.fillStyle = "#cc6644"; ctx.font = "bold 12px Arial";
+  ctx.fillText("\u2190 BACK", CW/2, bkY + 4);
+  ctx.textAlign = "left";
+}
+
 function drawTitle(ts) {
   ctx.strokeStyle = "#12122a"; ctx.lineWidth = 1;
   for (let x=0;x<CW;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,CH);ctx.stroke();}
@@ -611,56 +878,87 @@ function drawTitle(ts) {
   ctx.fillStyle = "#888"; ctx.font = "16px Arial";
   ctx.fillText("TOWER DEFENSE", CW/2, 130);
 
-  const bx = CW/2 - 310, by = 155, bw = 620, bh = 240;
-  ctx.fillStyle = "rgba(8,8,20,0.82)"; ctx.fillRect(bx, by, bw, bh);
-  ctx.strokeStyle = "#2a2a55"; ctx.lineWidth = 1.5; ctx.strokeRect(bx, by, bw, bh);
-  const col1 = [
-    ["LEFT CLICK  (empty cell)", "Place selected tower"],
-    ["LEFT CLICK  (tower)",      "Upgrade tower (up to LV 3)"],
-    ["RIGHT CLICK (tower)",      "Sell tower for 50% refund"],
-    ["1 \u2013 5",              "Select tower type"],
-    ["ENTER / SPACE",            "Start game / Restart"],
-  ];
-  const col2 = [
-    ["QUIT button", "Return to this screen"],
-    ["Mouse hover",  "Preview range & upgrade cost"],
-    ["\u2605",       "LV 1  (base stats)"],
-    ["\u2605\u2605", "LV 2  +50% dmg, +20% range"],
-    ["\u2605\u2605\u2605","LV 3  +120% dmg, +40% range"],
-  ];
-  ctx.font = "bold 12px Arial"; ctx.fillStyle = "#88ccff"; ctx.textAlign = "center";
-  ctx.fillText("CONTROLS", CW/2 - 155, by + 22);
-  ctx.fillText("UPGRADE LEVELS", CW/2 + 155, by + 22);
-  ctx.strokeStyle = "#2a2a55"; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(CW/2, by+8); ctx.lineTo(CW/2, by+bh-8); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(bx+8, by+30); ctx.lineTo(bx+bw-8, by+30); ctx.stroke();
-  const drawRows = (rows, startX, labelX) => {
-    rows.forEach(([label, val], i) => {
-      const ry = by + 52 + i * 36;
-      ctx.fillStyle = "#556688"; ctx.fillRect(startX, ry - 14, 296, 28);
-      ctx.fillStyle = "#FFD700"; ctx.font = "bold 11px Arial"; ctx.textAlign = "left";
-      ctx.fillText(label, labelX, ry + 2);
-      ctx.fillStyle = "#aaa"; ctx.font = "11px Arial"; ctx.fillText(val, labelX, ry + 15);
-    });
-  };
-  drawRows(col1, bx + 6,   bx + 12);
-  drawRows(col2, CW/2 + 4, CW/2 + 10);
   const blink = Math.floor(ts/600)%2===0;
   ctx.fillStyle = blink ? "#88ccff" : "#5588aa"; ctx.font = "bold 20px Arial"; ctx.textAlign = "center";
-  ctx.fillText("\u25b6  Click or Enter to Start  \u25c4", CW/2, by + bh + 35);
+  ctx.fillText("\u25b6  Click or Enter to Start  \u25c4", CW/2, CH/2 + 40);
+
+  // Leaderboard button
+  const lbBtnY = CH/2 + 90;
+  const lbHov = typeof lastMX !== "undefined" && lastMX >= CW/2-70 && lastMX <= CW/2+70 && lastMY >= lbBtnY-16 && lastMY <= lbBtnY+12;
+  ctx.fillStyle = lbHov ? "#1a2a44" : "#0d1a2e";
+  ctx.fillRect(CW/2-70, lbBtnY-16, 140, 30);
+  ctx.strokeStyle = lbHov ? "#88ccff" : "#335577"; ctx.lineWidth = 1;
+  ctx.strokeRect(CW/2-70, lbBtnY-16, 140, 30);
+  ctx.fillStyle = lbHov ? "#88ccff" : "#6699bb"; ctx.font = "bold 14px Arial";
+  ctx.fillText("\u2605 LEADERBOARD", CW/2, lbBtnY + 4);
   ctx.textAlign = "left";
 }
 
+let gameOverFormShown = false;
 function drawGameOver() {
+  if (!gameOverFormShown) {
+    gameOverFormShown = true;
+    document.getElementById("scoreMsg").textContent =
+      `Score: ${score} | Wave: ${wave} | ${MAPS[selectedMap].name} — Enter your name:`;
+    scoreName.value = "";
+    scoreForm.style.display = "block";
+    setTimeout(() => scoreName.focus(), 50);
+  }
   ctx.textAlign = "center";
   ctx.shadowColor = "#cc0000"; ctx.shadowBlur = 25;
   ctx.fillStyle = "#cc2200"; ctx.font = "bold 52px Arial";
-  ctx.fillText("GAME OVER", CW/2, CH/2 - 50);
+  ctx.fillText("GAME OVER", CW/2, CH/2 - 80);
   ctx.shadowBlur = 0;
   ctx.fillStyle = "white"; ctx.font = "22px Arial";
-  ctx.fillText(`Score: ${score}  \u2022  Wave: ${wave}  \u2022  Gold: ${gold}g`, CW/2, CH/2 + 8);
-  ctx.fillStyle = "#88ccff"; ctx.font = "18px Arial";
-  ctx.fillText("Click or Enter to play again", CW/2, CH/2 + 55);
+  ctx.fillText(`Score: ${score}  \u2022  Wave: ${wave}  \u2022  Map: ${MAPS[selectedMap].name}`, CW/2, CH/2 - 30);
+  ctx.fillStyle = "#556"; ctx.font = "14px Arial";
+  ctx.fillText("Press Escape to skip leaderboard", CW/2, CH/2 + 10);
+  ctx.textAlign = "left";
+}
+
+function drawLeaderboard() {
+  ctx.textAlign = "center";
+  ctx.shadowColor = "#FFD700"; ctx.shadowBlur = 18;
+  ctx.fillStyle = "#FFD700"; ctx.font = "bold 34px Arial";
+  ctx.fillText("\u2605 LEADERBOARD \u2605", CW/2, 60);
+  ctx.shadowBlur = 0;
+
+  if (!lbLoaded) {
+    ctx.fillStyle = "#888"; ctx.font = "16px Arial";
+    ctx.fillText("Loading...", CW/2, CH/2);
+    ctx.textAlign = "left"; return;
+  }
+  if (lbData.length === 0) {
+    ctx.fillStyle = "#666"; ctx.font = "16px Arial";
+    ctx.fillText("No scores yet — be the first!", CW/2, CH/2);
+    ctx.textAlign = "left"; return;
+  }
+
+  const rowH = 36, startY = 100, colX = [80, 260, 400, 500, 630];
+  ctx.fillStyle = "#445"; ctx.font = "bold 12px Arial";
+  ["#", "NAME", "SCORE", "WAVE", "MAP"].forEach((h, i) => ctx.fillText(h, colX[i], startY));
+  ctx.strokeStyle = "#334"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(60, startY + 8); ctx.lineTo(740, startY + 8); ctx.stroke();
+
+  lbData.forEach((entry, i) => {
+    const y = startY + rowH * (i + 1);
+    const hl = i === 0;
+    ctx.fillStyle = hl ? "rgba(255,215,0,0.06)" : (i%2===0 ? "rgba(255,255,255,0.02)" : "transparent");
+    ctx.fillRect(62, y - rowH + 10, 676, rowH);
+    ctx.fillStyle = hl ? "#FFD700" : (i < 3 ? "#aad4ff" : "#888");
+    ctx.font = hl ? "bold 14px Arial" : "13px Arial";
+    const rank = i === 0 ? "\uD83E\uDD47" : i === 1 ? "\uD83E\uDD48" : i === 2 ? "\uD83E\uDD49" : `${i+1}.`;
+    ctx.fillText(rank, colX[0], y);
+    ctx.fillText(entry.name, colX[1], y);
+    ctx.fillStyle = "#88ff88"; ctx.font = "bold 13px Arial";
+    ctx.fillText(entry.score.toLocaleString(), colX[2], y);
+    ctx.fillStyle = hl ? "#FFD700" : "#888"; ctx.font = "13px Arial";
+    ctx.fillText(entry.wave, colX[3], y);
+    ctx.fillText(entry.map || "?", colX[4], y);
+  });
+
+  ctx.fillStyle = "#445"; ctx.font = "13px Arial";
+  ctx.fillText("Click or press Enter / Escape to return", CW/2, CH - 30);
   ctx.textAlign = "left";
 }
 
@@ -672,6 +970,16 @@ requestAnimationFrame(gameLoop);
 @app.route("/")
 def index():
     return PAGE
+
+@app.route("/scores", methods=["GET"])
+def get_scores():
+    return jsonify(load_scores())
+
+@app.route("/scores", methods=["POST"])
+def post_score():
+    data = request.get_json(silent=True) or {}
+    save_score(data.get("name","???"), data.get("score",0), data.get("wave",0), data.get("map","?"))
+    return jsonify({"ok": True})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
